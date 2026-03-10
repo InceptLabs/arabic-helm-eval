@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import ijson
@@ -13,7 +14,26 @@ import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
 
-BATCH_SIZE = 10
+import re
+
+BATCH_SIZE = 50
+
+
+def _json_default(obj):
+    """Handle Decimal and other non-serializable types from ijson."""
+    if isinstance(obj, Decimal):
+        return float(obj)
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def extract_category_from_run_name(run_name):
+    """Extract subset or subject from a HELM run directory name.
+
+    E.g. 'alghafa:subset=meta_ar_msa,model=...' -> 'meta_ar_msa'
+         'arabic_mmlu:subject=anatomy,model=...' -> 'anatomy'
+    """
+    m = re.search(r'(?:subset|subject|category)=([^,]+)', run_name)
+    return m.group(1) if m else None
 
 
 def get_git_info():
@@ -136,7 +156,7 @@ def insert_run(cur, run_spec, stats, suite, git_commit, git_branch):
     return cur.fetchone()[0]
 
 
-def build_sample_row(run_id, idx, request_state, instance_stats):
+def build_sample_row(run_id, idx, request_state, instance_stats, category=None):
     """Build a tuple for inserting into eval_samples."""
     instance = request_state["instance"]
     references = instance.get("references", [])
@@ -197,6 +217,7 @@ def build_sample_row(run_id, idx, request_state, instance_stats):
     return (
         run_id,
         sample_index,
+        category,
         fmt,
         instruction,
         reference,
@@ -206,15 +227,15 @@ def build_sample_row(run_id, idx, request_state, instance_stats):
         judge_score,
         latency_ms,
         answer_tokens,
-        json.dumps(meta, ensure_ascii=False),
+        json.dumps(meta, ensure_ascii=False, default=_json_default),
     )
 
 
 INSERT_SAMPLES_SQL = """
     INSERT INTO eval_samples
-        (run_id, sample_index, format, instruction, reference, prediction,
+        (run_id, sample_index, category, format, instruction, reference, prediction,
          raw_prompt, raw_response, judge_score, latency_ms, answer_tokens, meta)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
 
@@ -227,7 +248,7 @@ def flush_batch(cur, conn, batch, total_inserted):
     return total_inserted
 
 
-def stream_and_store_samples(conn, cur, run_id, run_dir, instance_stats):
+def stream_and_store_samples(conn, cur, run_id, run_dir, instance_stats, category=None):
     """Stream scenario_state.json and insert samples in batches of 10."""
     scenario_path = run_dir / "scenario_state.json"
 
@@ -237,7 +258,7 @@ def stream_and_store_samples(conn, cur, run_id, run_dir, instance_stats):
 
     with open(scenario_path, "rb") as f:
         for request_state in ijson.items(f, "request_states.item"):
-            row = build_sample_row(run_id, idx, request_state, instance_stats)
+            row = build_sample_row(run_id, idx, request_state, instance_stats, category=category)
             batch.append(row)
             idx += 1
 
@@ -253,6 +274,54 @@ def stream_and_store_samples(conn, cur, run_id, run_dir, instance_stats):
     return total_inserted
 
 
+def validate_run_dir(run_dir):
+    """Check that a run directory exists and has all required files. Returns list of missing files."""
+    required = ("run_spec.json", "scenario_state.json", "per_instance_stats.json", "stats.json")
+    return [f for f in required if not (run_dir / f).exists()]
+
+
+def process_single_run(conn, cur, run_dir, suite, git_commit, git_branch):
+    """Process a single HELM run directory: insert run + samples into DB.
+
+    Returns (run_id, total_samples) on success.
+    Raises on error (caller handles rollback/cleanup).
+    """
+    run_spec = load_json(run_dir / "run_spec.json")
+    stats = load_json(run_dir / "stats.json")
+    per_instance_stats = load_json(run_dir / "per_instance_stats.json")
+
+    instance_stats = build_instance_stats_lookup(per_instance_stats)
+    print(f"  Loaded stats for {len(instance_stats)} instances")
+
+    # Insert eval_runs
+    run_id = insert_run(cur, run_spec, stats, suite, git_commit, git_branch)
+    conn.commit()
+    print(f"  Created eval_run id={run_id}")
+
+    # Stream and insert samples
+    category = extract_category_from_run_name(run_dir.name)
+    total = stream_and_store_samples(conn, cur, run_id, run_dir, instance_stats, category=category)
+
+    # Update total_samples on the run
+    cur.execute(
+        "UPDATE eval_runs SET total_samples = %s, completed_at = NOW() WHERE id = %s",
+        (total, run_id),
+    )
+    conn.commit()
+
+    # Summary
+    if any("alrage_score" in s for s in instance_stats.values()):
+        scores = [s.get("alrage_score", 0) for s in instance_stats.values()]
+        avg_score = sum(scores) / len(scores) if scores else 0
+        print(f"  Done! run_id={run_id}, samples={total}, avg_score={avg_score:.3f}")
+    else:
+        correct = sum(1 for s in instance_stats.values() if s.get("exact_match", 0) == 1.0)
+        accuracy = (correct / total * 100) if total > 0 else 0
+        print(f"  Done! run_id={run_id}, samples={total}, accuracy={accuracy:.1f}%")
+
+    return run_id, total
+
+
 def main():
     parser = argparse.ArgumentParser(description="Store HELM results in database")
     parser.add_argument("--run-dir", required=True, help="Path to HELM run output directory")
@@ -264,66 +333,25 @@ def main():
         print(f"Error: run directory not found: {run_dir}")
         sys.exit(1)
 
-    # Check required files
-    for fname in ("run_spec.json", "scenario_state.json", "per_instance_stats.json", "stats.json"):
-        if not (run_dir / fname).exists():
+    missing = validate_run_dir(run_dir)
+    if missing:
+        for fname in missing:
             print(f"Error: missing {fname} in {run_dir}")
-            sys.exit(1)
+        sys.exit(1)
 
     print(f"Loading run from: {run_dir}")
 
-    # Step 1: Load small files
-    run_spec = load_json(run_dir / "run_spec.json")
-    stats = load_json(run_dir / "stats.json")
-    per_instance_stats = load_json(run_dir / "per_instance_stats.json")
-
-    # Step 2: Build instance stats lookup
-    instance_stats = build_instance_stats_lookup(per_instance_stats)
-    print(f"  Loaded stats for {len(instance_stats)} instances")
-
-    # Step 3: Git info
     git_commit, git_branch = get_git_info()
     print(f"  Git: {git_branch}@{git_commit[:8] if git_commit else 'N/A'}")
 
-    # Step 4: Connect to DB
     conn = get_db_connection()
     cur = conn.cursor()
 
     try:
-        # Step 5: Insert eval_runs
-        run_id = insert_run(cur, run_spec, stats, args.suite, git_commit, git_branch)
-        conn.commit()
-        print(f"  Created eval_run id={run_id}")
-
-        # Step 6: Stream and insert samples in batches of 10
-        total = stream_and_store_samples(conn, cur, run_id, run_dir, instance_stats)
-
-        # Step 7: Update total_samples on the run
-        cur.execute(
-            "UPDATE eval_runs SET total_samples = %s, completed_at = NOW() WHERE id = %s",
-            (total, run_id),
-        )
-        conn.commit()
-
-        # Summary
-        if any("alrage_score" in s for s in instance_stats.values()):
-            scores = [s.get("alrage_score", 0) for s in instance_stats.values()]
-            avg_score = sum(scores) / len(scores) if scores else 0
-            print(f"\nDone! run_id={run_id}, samples={total}, avg_score={avg_score:.3f}")
-        else:
-            correct = sum(1 for s in instance_stats.values() if s.get("exact_match", 0) == 1.0)
-            accuracy = (correct / total * 100) if total > 0 else 0
-            print(f"\nDone! run_id={run_id}, samples={total}, accuracy={accuracy:.1f}%")
-
+        process_single_run(conn, cur, run_dir, args.suite, git_commit, git_branch)
     except Exception as e:
         conn.rollback()
         print(f"\nError: {e}")
-        # Clean up partial run
-        if "run_id" in locals():
-            cur.execute("DELETE FROM eval_samples WHERE run_id = %s", (run_id,))
-            cur.execute("DELETE FROM eval_runs WHERE id = %s", (run_id,))
-            conn.commit()
-            print(f"  Cleaned up partial run_id={run_id}")
         raise
     finally:
         cur.close()
