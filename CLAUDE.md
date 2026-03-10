@@ -37,6 +37,46 @@ helm-server --suite <suite-name>
 helm-create-plots --suite <suite-name>
 ```
 
+## Unified CLI (Recommended)
+
+One command to configure, evaluate, and store results:
+
+```bash
+# Fireworks model
+python helm_eval.py \
+  --model-name fireworks/kimi-k2p5 \
+  --api-base https://api.fireworks.ai/inference/v1 \
+  --api-model accounts/fireworks/models/kimi-k2p5 \
+  --tokenizer Qwen/Qwen2.5-7B \
+  --benchmark aratrust \
+  --suite my-experiment \
+  --max-instances 600
+
+# Local LM Studio model
+python helm_eval.py \
+  --model-name local/qwen3-5-9b \
+  --api-base http://127.0.0.1:1234/v1 \
+  --api-key lm-studio \
+  --tokenizer Qwen/Qwen3.5-9B \
+  --benchmark arabic_mmlu \
+  --suite local-test \
+  --max-instances 10
+```
+
+This auto-generates YAML configs, runs HELM, and streams results to `eval_runs` + `eval_samples` in batches of 10. Git commit is tracked per run. DB credentials in `.env`.
+
+**Available benchmarks:** `aratrust`, `arabic_mmlu`, `alghafa`, `arabic_exams`, `arabic_mmmlu`
+
+### Standalone tools (alternative)
+
+```bash
+# Store results from a specific run directory
+python store_helm_results.py --run-dir benchmark_output/runs/<suite>/<run-name> --suite <suite>
+
+# Or use the shell wrapper
+./run_and_store.sh <suite-name> [conf-file] [max-instances]
+```
+
 ## Architecture
 
 The project is a thin configuration layer on top of HELM. The actual evaluation framework code lives inside `helm-env/lib/python3.10/site-packages/helm/`. Custom work here focuses on:

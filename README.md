@@ -101,11 +101,20 @@ helm-server --suite <suite-name>
 ### Example: Run AraTrust on Kimi K2.5
 
 ```bash
+# Full run (all 522 instances, 8 parallel threads)
 PYTHONPATH=. helm-run \
   --conf-paths run_specs_test.conf \
-  --suite arabic-kimi-k2p5 \
+  --suite aratrust-kimi-k2p5-sysprompt \
   --local-path . \
-  --max-eval-instances 522
+  --max-eval-instances 600 \
+  -n 8
+
+# Quick test run (10 instances)
+PYTHONPATH=. helm-run \
+  --conf-paths run_specs_test.conf \
+  --suite test-fix \
+  --local-path . \
+  --max-eval-instances 10
 ```
 
 ## Adding a New Model
