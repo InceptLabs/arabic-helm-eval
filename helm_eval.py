@@ -45,11 +45,46 @@ PROJECT_DIR = Path(__file__).parent
 # Available benchmarks and their default args
 BENCHMARKS = {
     "aratrust": "category=all",
-    "arabic_mmlu": "subset=all",
+    "arabic_mmlu": "subset=All",
     "alghafa": "subset=all",
     "arabic_exams": "subject=all",
     "arabic_mmmlu": "subject=all",
 }
+
+# Benchmarks that don't support "all" natively — must expand to individual subsets
+ALGHAFA_SUBSETS = [
+    "mcq_exams_test_ar",
+    "meta_ar_dialects",
+    "meta_ar_msa",
+    "multiple_choice_facts_truefalse_balanced_task",
+    "multiple_choice_grounded_statement_soqal_task",
+    "multiple_choice_grounded_statement_xglue_mlqa_task",
+    "multiple_choice_rating_sentiment_no_neutral_task",
+    "multiple_choice_rating_sentiment_task",
+    "multiple_choice_sentiment_task",
+]
+
+ARABIC_MMMLU_SUBJECTS = [
+    "abstract_algebra", "anatomy", "astronomy", "business_ethics",
+    "clinical_knowledge", "college_biology", "college_chemistry",
+    "college_computer_science", "college_mathematics", "college_medicine",
+    "college_physics", "computer_security", "conceptual_physics",
+    "econometrics", "electrical_engineering", "elementary_mathematics",
+    "formal_logic", "global_facts", "high_school_biology",
+    "high_school_chemistry", "high_school_computer_science",
+    "high_school_european_history", "high_school_geography",
+    "high_school_government_and_politics", "high_school_macroeconomics",
+    "high_school_mathematics", "high_school_microeconomics",
+    "high_school_physics", "high_school_psychology", "high_school_statistics",
+    "high_school_us_history", "high_school_world_history", "human_aging",
+    "human_sexuality", "international_law", "jurisprudence",
+    "logical_fallacies", "machine_learning", "management", "marketing",
+    "medical_genetics", "miscellaneous", "moral_disputes", "moral_scenarios",
+    "nutrition", "philosophy", "prehistory", "professional_accounting",
+    "professional_law", "professional_medicine", "professional_psychology",
+    "public_relations", "security_studies", "sociology", "us_foreign_policy",
+    "virology", "world_religions",
+]
 
 
 def load_yaml(path):
@@ -164,18 +199,32 @@ def ensure_model_metadata(args):
     print(f"  model_metadata.yaml: {action} {args.model_name}")
 
 
+def _expand_benchmark_entries(benchmark, bench_args, model_name):
+    """Expand a benchmark into one or more run spec entries.
+
+    Benchmarks like alghafa and arabic_mmmlu don't support 'all' natively,
+    so we expand them into individual subset entries.
+    """
+    if benchmark == "alghafa" and bench_args == "subset=all":
+        return [f"alghafa:subset={s},model={model_name}" for s in ALGHAFA_SUBSETS]
+    if benchmark == "arabic_mmmlu" and bench_args == "subject=all":
+        return [f"mbzuai_human_translated_arabic_mmlu:subject={s},model={model_name}" for s in ARABIC_MMMLU_SUBJECTS]
+    # arabic_mmmlu uses a different HELM run spec name
+    if benchmark == "arabic_mmmlu":
+        return [f"mbzuai_human_translated_arabic_mmlu:{bench_args},model={model_name}"]
+    return [f"{benchmark}:{bench_args},model={model_name}"]
+
+
 def generate_run_spec(args):
     """Generate a run_specs conf file for this run."""
     benchmark = args.benchmark
     bench_args = args.benchmark_args or BENCHMARKS.get(benchmark, "")
-    description = f"{benchmark}:{bench_args},model={args.model_name}"
+    entries = _expand_benchmark_entries(benchmark, bench_args, args.model_name)
 
+    lines = ",\n".join(f'  {{description: "{e}", priority: 1}}' for e in entries)
     conf_path = PROJECT_DIR / f"run_specs_{args.suite}.conf"
-    conf_path.write_text(
-        f'entries: [\n  {{description: "{description}", priority: 1}}\n]\n',
-        encoding="utf-8",
-    )
-    print(f"  {conf_path.name}: {description}")
+    conf_path.write_text(f"entries: [\n{lines}\n]\n", encoding="utf-8")
+    print(f"  {conf_path.name}: {len(entries)} entries ({benchmark})")
     return conf_path
 
 
