@@ -220,6 +220,12 @@ python store_helm_results.py \
 | `alghafa` | AlGhafa Arabic NLP benchmark suite (multiple subtasks) | `subset=all` | `alghafa:subset=all,model=<model>` |
 | `arabic_exams` | Arabic school exam questions | `subject=all` | `arabic_exams:subject=all,model=<model>` |
 | `arabic_mmmlu` | Arabic Multilingual MMLU | `subject=all` | `arabic_mmmlu:subject=all,model=<model>` |
+| `alrage` | Arabic RAG Evaluation — open-book QA scored by GPT-4o | *(none)* | `alrage:model=<model>` |
+
+> **Note:** The `alrage` benchmark is a generation task (not MCQ) that requires GPT-4o as a judge. You must add a valid OpenAI API key to `credentials.conf`:
+> ```
+> openaiApiKey: "sk-..."
+> ```
 
 ### Overriding benchmark arguments
 
