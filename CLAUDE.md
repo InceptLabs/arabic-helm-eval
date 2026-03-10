@@ -20,13 +20,12 @@ This project uses Stanford's **HELM** (Holistic Evaluation of Language Models) f
 
 ## Running Evaluations
 
-All commands require the venv to be activated first.
+All commands require the venv to be activated first. `PYTHONPATH=.` is required so HELM can find the custom `fireworks_client.py`.
 
 ```bash
 # Run a benchmark evaluation
-helm-run --conf-paths run_specs.conf --suite <suite-name> \
-  --model-deployment-config model_deployments.yaml \
-  --model-metadata-config model_metadata.yaml
+PYTHONPATH=. helm-run --conf-paths run_specs_test.conf --suite <suite-name> \
+  --local-path . --max-eval-instances <number>
 
 # Summarize results
 helm-summarize --suite <suite-name>
@@ -42,8 +41,9 @@ helm-create-plots --suite <suite-name>
 
 The project is a thin configuration layer on top of HELM. The actual evaluation framework code lives inside `helm-env/lib/python3.10/site-packages/helm/`. Custom work here focuses on:
 
-1. Defining which local models to evaluate (`model_deployments.yaml`)
+1. Defining which models to evaluate (`model_deployments.yaml`)
 2. Providing model metadata for reporting (`model_metadata.yaml`)
 3. Configuring run specifications for Arabic-specific benchmarks
+4. Custom client (`fireworks_client.py`) to disable thinking mode for Fireworks AI models
 
-Models connect via `helm.clients.openai_client.OpenAIClient` pointing to the local LM Studio server.
+Models connect via `helm.clients.openai_client.OpenAIClient` (local) or `fireworks_client.FireworksNoThinkingClient` (Fireworks AI with thinking disabled).
