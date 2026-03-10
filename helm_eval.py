@@ -49,7 +49,11 @@ BENCHMARKS = {
     "alghafa": "subset=all",
     "arabic_exams": "subject=all",
     "arabic_mmmlu": "subject=all",
+    "alrage": "",
 }
+
+# Generation benchmarks should NOT get the MCQ system prompt
+GENERATION_BENCHMARKS = {"alrage"}
 
 # Benchmarks that don't support "all" natively — must expand to individual subsets
 ALGHAFA_SUBSETS = [
@@ -121,12 +125,15 @@ def ensure_model_deployment(args):
     deployments = data.setdefault("model_deployments", [])
 
     if args.api_model:
+        fireworks_args = {
+            "base_url": args.api_base,
+            "openai_model_name": args.api_model,
+        }
+        if args.benchmark in GENERATION_BENCHMARKS:
+            fireworks_args["system_prompt"] = ""
         client_spec = {
             "class_name": "fireworks_client.FireworksNoThinkingClient",
-            "args": {
-                "base_url": args.api_base,
-                "openai_model_name": args.api_model,
-            },
+            "args": fireworks_args,
         }
     else:
         client_spec = {
@@ -212,7 +219,9 @@ def _expand_benchmark_entries(benchmark, bench_args, model_name):
     # arabic_mmmlu uses a different HELM run spec name
     if benchmark == "arabic_mmmlu":
         return [f"mbzuai_human_translated_arabic_mmlu:{bench_args},model={model_name}"]
-    return [f"{benchmark}:{bench_args},model={model_name}"]
+    if bench_args:
+        return [f"{benchmark}:{bench_args},model={model_name}"]
+    return [f"{benchmark}:model={model_name}"]
 
 
 def generate_run_spec(args):
@@ -327,11 +336,16 @@ def store_results(suite):
             )
             conn.commit()
 
-            correct = sum(
-                1 for s in instance_stats.values() if s.get("exact_match", 0) == 1.0
-            )
-            accuracy = (correct / total * 100) if total > 0 else 0
-            print(f"  Done! run_id={run_id}, samples={total}, accuracy={accuracy:.1f}%")
+            if any("alrage_score" in s for s in instance_stats.values()):
+                scores = [s.get("alrage_score", 0) for s in instance_stats.values()]
+                avg_score = sum(scores) / len(scores) if scores else 0
+                print(f"  Done! run_id={run_id}, samples={total}, avg_score={avg_score:.3f}")
+            else:
+                correct = sum(
+                    1 for s in instance_stats.values() if s.get("exact_match", 0) == 1.0
+                )
+                accuracy = (correct / total * 100) if total > 0 else 0
+                print(f"  Done! run_id={run_id}, samples={total}, accuracy={accuracy:.1f}%")
 
         except Exception as e:
             conn.rollback()
