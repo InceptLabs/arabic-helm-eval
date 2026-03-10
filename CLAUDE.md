@@ -42,13 +42,23 @@ helm-create-plots --suite <suite-name>
 One command to configure, evaluate, and store results:
 
 ```bash
-# Fireworks model
+# Fireworks model (single benchmark)
 python helm_eval.py \
   --model-name fireworks/kimi-k2p5 \
   --api-base https://api.fireworks.ai/inference/v1 \
   --api-model accounts/fireworks/models/kimi-k2p5 \
   --tokenizer Qwen/Qwen2.5-7B \
   --benchmark aratrust \
+  --suite my-experiment \
+  --max-instances 600
+
+# Multiple benchmarks in one command
+python helm_eval.py \
+  --model-name fireworks/kimi-k2p5 \
+  --api-base https://api.fireworks.ai/inference/v1 \
+  --api-model accounts/fireworks/models/kimi-k2p5 \
+  --tokenizer Qwen/Qwen2.5-7B \
+  --benchmark aratrust arabic_mmlu alghafa \
   --suite my-experiment \
   --max-instances 600
 
@@ -65,7 +75,7 @@ python helm_eval.py \
 
 This auto-generates YAML configs, runs HELM, and streams results to `eval_runs` + `eval_samples` in batches of 10. Git commit is tracked per run. DB credentials in `.env`.
 
-**Available benchmarks:** `aratrust`, `arabic_mmlu`, `alghafa`, `arabic_exams`, `arabic_mmmlu`, `alrage`
+**Available benchmarks:** `aratrust`, `arabic_mmlu`, `alghafa`, `arabic_exams`, `arabic_mmmlu`, `alrage` (pass multiple to `--benchmark` to run several at once)
 
 > **Note:** `alrage` is a generation benchmark (not MCQ) scored by GPT-4o. Requires a valid OpenAI API key in `credentials.conf`.
 

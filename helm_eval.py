@@ -2,7 +2,7 @@
 """Unified CLI: configure HELM, run evaluation, and store results in DB — all in one command.
 
 Usage:
-    # Fireworks model
+    # Single benchmark
     python helm_eval.py \\
       --model-name fireworks/kimi-k2p5 \\
       --api-base https://api.fireworks.ai/inference/v1 \\
@@ -12,15 +12,15 @@ Usage:
       --suite my-test \\
       --max-instances 10
 
-    # Local LM Studio model
+    # Multiple benchmarks
     python helm_eval.py \\
-      --model-name local/my-model \\
-      --api-base http://127.0.0.1:1234/v1 \\
-      --api-key lm-studio \\
-      --tokenizer Qwen/Qwen3.5-9B \\
-      --benchmark aratrust \\
-      --suite local-test \\
-      --max-instances 10
+      --model-name fireworks/kimi-k2p5 \\
+      --api-base https://api.fireworks.ai/inference/v1 \\
+      --api-model accounts/fireworks/models/kimi-k2p5 \\
+      --tokenizer Qwen/Qwen2.5-7B \\
+      --benchmark aratrust arabic_mmlu alghafa \\
+      --suite my-test \\
+      --max-instances 600
 """
 
 import argparse
@@ -33,6 +33,7 @@ import yaml
 
 from store_helm_results import (
     build_instance_stats_lookup,
+    extract_category_from_run_name,
     get_db_connection,
     get_git_info,
     insert_run,
@@ -129,7 +130,7 @@ def ensure_model_deployment(args):
             "base_url": args.api_base,
             "openai_model_name": args.api_model,
         }
-        if args.benchmark in GENERATION_BENCHMARKS:
+        if args._current_benchmark in GENERATION_BENCHMARKS:
             fireworks_args["system_prompt"] = ""
         client_spec = {
             "class_name": "fireworks_client.FireworksNoThinkingClient",
@@ -226,7 +227,7 @@ def _expand_benchmark_entries(benchmark, bench_args, model_name):
 
 def generate_run_spec(args):
     """Generate a run_specs conf file for this run."""
-    benchmark = args.benchmark
+    benchmark = args._current_benchmark
     bench_args = args.benchmark_args or BENCHMARKS.get(benchmark, "")
     entries = _expand_benchmark_entries(benchmark, bench_args, args.model_name)
 
@@ -286,7 +287,13 @@ def run_helm(conf_path, suite, max_instances, num_threads=1):
 
 
 def store_results(suite):
-    """Find run directories and store results in DB."""
+    """Find run directories and store results in DB.
+
+    Multiple run dirs that share the same benchmark (e.g. alghafa subsets)
+    are grouped into a single eval_run with subset stored in eval_samples.category.
+    """
+    import json as _json
+
     print(f"\n=== Storing Results ===")
     suite_dir = PROJECT_DIR / "benchmark_output" / "runs" / suite
 
@@ -294,63 +301,100 @@ def store_results(suite):
         print(f"Error: suite directory not found: {suite_dir}")
         sys.exit(1)
 
-    run_dirs = [
-        d for d in suite_dir.iterdir()
-        if d.is_dir() and (d / "scenario_state.json").exists()
-    ]
+    run_dirs = sorted(
+        [d for d in suite_dir.iterdir() if d.is_dir() and (d / "scenario_state.json").exists()]
+    )
     if not run_dirs:
         print(f"Error: no completed runs found in {suite_dir}")
         sys.exit(1)
 
     git_commit, git_branch = get_git_info()
 
+    # Group run dirs by base benchmark name (before the colon)
+    groups = {}
     for run_dir in run_dirs:
-        print(f"\nStoring: {run_dir.name}")
+        base_name = run_dir.name.split(":")[0]  # e.g. "alghafa"
+        groups.setdefault(base_name, []).append(run_dir)
 
+    for base_name, dirs in groups.items():
+        # Use first run dir to create the parent eval_run
+        first_dir = dirs[0]
         required = ("run_spec.json", "scenario_state.json", "per_instance_stats.json", "stats.json")
-        missing = [f for f in required if not (run_dir / f).exists()]
+        missing = [f for f in required if not (first_dir / f).exists()]
         if missing:
-            print(f"  Skipping — missing: {', '.join(missing)}")
+            print(f"  Skipping {base_name} — missing: {', '.join(missing)}")
             continue
 
-        run_spec = load_json(run_dir / "run_spec.json")
-        stats = load_json(run_dir / "stats.json")
-        per_instance_stats = load_json(run_dir / "per_instance_stats.json")
-        instance_stats = build_instance_stats_lookup(per_instance_stats)
-        print(f"  Loaded stats for {len(instance_stats)} instances")
+        run_spec = load_json(first_dir / "run_spec.json")
+        stats = load_json(first_dir / "stats.json")
+
+        print(f"\nStoring: {base_name} ({len(dirs)} subset(s))")
         print(f"  Git: {git_branch}@{git_commit[:8] if git_commit else 'N/A'}")
 
         conn = get_db_connection()
         cur = conn.cursor()
+        run_id = None
 
         try:
             run_id = insert_run(cur, run_spec, stats, suite, git_commit, git_branch)
             conn.commit()
             print(f"  Created eval_run id={run_id}")
 
-            total = stream_and_store_samples(conn, cur, run_id, run_dir, instance_stats)
+            grand_total = 0
+            all_instance_stats = {}
+            per_subset_metrics = {}
+
+            for run_dir in dirs:
+                req = [f for f in required if not (run_dir / f).exists()]
+                if req:
+                    print(f"  Skipping {run_dir.name} — missing: {', '.join(req)}")
+                    continue
+
+                category = extract_category_from_run_name(run_dir.name)
+                subset_label = category or run_dir.name
+
+                per_instance_stats = load_json(run_dir / "per_instance_stats.json")
+                instance_stats = build_instance_stats_lookup(per_instance_stats)
+                all_instance_stats.update(instance_stats)
+
+                total = stream_and_store_samples(conn, cur, run_id, run_dir, instance_stats, category=category)
+                grand_total += total
+
+                # Per-subset accuracy
+                subset_stats = load_json(run_dir / "stats.json")
+                for stat in subset_stats:
+                    name = stat["name"]["name"]
+                    if name in ("exact_match", "alrage_score"):
+                        per_subset_metrics[subset_label] = stat.get("mean", stat.get("sum"))
+
+                print(f"  {subset_label}: {total} samples")
+
+            # Update run with aggregated totals and per-subset metrics
+            is_generation = any("alrage_score" in s for s in all_instance_stats.values())
+            if is_generation:
+                scores = [s.get("alrage_score", 0) for s in all_instance_stats.values()]
+                overall = sum(scores) / len(scores) if scores else 0
+                agg_metrics = {"alrage_score": overall, "per_subset": per_subset_metrics}
+            else:
+                correct = sum(1 for s in all_instance_stats.values() if s.get("exact_match", 0) == 1.0)
+                overall = correct / grand_total if grand_total > 0 else 0
+                agg_metrics = {"exact_match": overall, "per_subset": per_subset_metrics}
 
             cur.execute(
-                "UPDATE eval_runs SET total_samples = %s, completed_at = NOW() WHERE id = %s",
-                (total, run_id),
+                "UPDATE eval_runs SET total_samples = %s, metrics = %s, completed_at = NOW() WHERE id = %s",
+                (grand_total, _json.dumps(agg_metrics, ensure_ascii=False), run_id),
             )
             conn.commit()
 
-            if any("alrage_score" in s for s in instance_stats.values()):
-                scores = [s.get("alrage_score", 0) for s in instance_stats.values()]
-                avg_score = sum(scores) / len(scores) if scores else 0
-                print(f"  Done! run_id={run_id}, samples={total}, avg_score={avg_score:.3f}")
+            if is_generation:
+                print(f"  Done! run_id={run_id}, samples={grand_total}, avg_score={overall:.3f}")
             else:
-                correct = sum(
-                    1 for s in instance_stats.values() if s.get("exact_match", 0) == 1.0
-                )
-                accuracy = (correct / total * 100) if total > 0 else 0
-                print(f"  Done! run_id={run_id}, samples={total}, accuracy={accuracy:.1f}%")
+                print(f"  Done! run_id={run_id}, samples={grand_total}, accuracy={overall*100:.1f}%")
 
         except Exception as e:
             conn.rollback()
             print(f"  Error: {e}")
-            if "run_id" in locals():
+            if run_id is not None:
                 cur.execute("DELETE FROM eval_samples WHERE run_id = %s", (run_id,))
                 cur.execute("DELETE FROM eval_runs WHERE id = %s", (run_id,))
                 conn.commit()
@@ -367,11 +411,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Fireworks model
+  # Single benchmark
   python helm_eval.py --model-name fireworks/kimi-k2p5 \\
     --api-base https://api.fireworks.ai/inference/v1 \\
     --api-model accounts/fireworks/models/kimi-k2p5 \\
     --benchmark aratrust --suite test-run --max-instances 10
+
+  # Multiple benchmarks
+  python helm_eval.py --model-name fireworks/kimi-k2p5 \\
+    --api-base https://api.fireworks.ai/inference/v1 \\
+    --api-model accounts/fireworks/models/kimi-k2p5 \\
+    --benchmark aratrust arabic_mmlu alghafa --suite full-run --max-instances 600
 
   # Local model
   python helm_eval.py --model-name local/qwen3-5-9b \\
@@ -387,8 +437,9 @@ Examples:
     parser.add_argument("--tokenizer", default="Qwen/Qwen2.5-7B", help="HuggingFace tokenizer (default: Qwen/Qwen2.5-7B)")
     parser.add_argument("--max-seq-len", type=int, default=131072, help="Max sequence length (default: 131072)")
 
-    parser.add_argument("--benchmark", default="aratrust", choices=list(BENCHMARKS.keys()),
-                        help="Benchmark to run (default: aratrust)")
+    parser.add_argument("--benchmark", nargs="+", default=["aratrust"],
+                        choices=list(BENCHMARKS.keys()),
+                        help="Benchmark(s) to run (default: aratrust)")
     parser.add_argument("--benchmark-args", default=None, help="Override benchmark args (e.g. category=all)")
     parser.add_argument("--suite", required=True, help="Suite name for output dir and DB tracking")
     parser.add_argument("--max-instances", type=int, default=600, help="Max eval instances (default: 600)")
@@ -401,18 +452,30 @@ Examples:
     args = parser.parse_args()
 
     print("=== Configuring HELM ===")
+    # One-time setup (not benchmark-dependent)
+    args._current_benchmark = args.benchmark[0]
     tokenizer_name = ensure_model_deployment(args)
     ensure_tokenizer_config(args, tokenizer_name)
     ensure_model_metadata(args)
-    conf_path = generate_run_spec(args)
     update_credentials(args)
 
-    try:
-        run_helm(conf_path, args.suite, args.max_instances, args.num_threads)
-    finally:
-        if conf_path.exists():
-            conf_path.unlink()
-            print(f"  Cleaned up {conf_path.name}")
+    benchmarks = args.benchmark
+    print(f"\nBenchmarks to run: {', '.join(benchmarks)}")
+
+    for i, benchmark in enumerate(benchmarks, 1):
+        print(f"\n=== Benchmark {i}/{len(benchmarks)}: {benchmark} ===")
+        args._current_benchmark = benchmark
+
+        # Reconfigure model deployment for correct system prompt (MCQ vs generation)
+        ensure_model_deployment(args)
+
+        conf_path = generate_run_spec(args)
+        try:
+            run_helm(conf_path, args.suite, args.max_instances, args.num_threads)
+        finally:
+            if conf_path.exists():
+                conf_path.unlink()
+                print(f"  Cleaned up {conf_path.name}")
 
     store_results(args.suite)
 
