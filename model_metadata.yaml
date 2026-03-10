@@ -1,0 +1,8 @@
+models:
+  - name: local/qwen3-5-9b
+    display_name: Qwen3.5 9B (Local)
+    description: Qwen3.5 9B running locally via LM Studio
+    creator_organization_name: Alibaba
+    access: open
+    num_parameters: 9000000000
+    release_date: 2026-03-02

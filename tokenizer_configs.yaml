@@ -1,0 +1,8 @@
+tokenizer_configs:
+  - name: qwen/qwen3.5-9b
+    tokenizer_spec:
+      class_name: "helm.tokenizers.huggingface_tokenizer.HuggingFaceTokenizer"
+      args:
+        pretrained_model_name_or_path: Qwen/Qwen3.5-9B
+    end_of_text_token: "<|im_end|>"
+    prefix_token: "<|im_start|>"
