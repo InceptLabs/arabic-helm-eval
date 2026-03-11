@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 import re
 
-BATCH_SIZE = 50
+BATCH_SIZE = 500
 
 
 def _json_default(obj):

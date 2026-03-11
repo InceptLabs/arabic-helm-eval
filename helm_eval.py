@@ -170,6 +170,7 @@ def ensure_model_deployment(args):
 def ensure_tokenizer_config(args, tokenizer_name):
     """Add or update tokenizer entry in tokenizer_configs.yaml."""
     path = PROJECT_DIR / "tokenizer_configs.yaml"
+    print("Path: ", path)
     data = load_yaml(path)
     configs = data.setdefault("tokenizer_configs", [])
 
@@ -179,8 +180,10 @@ def ensure_tokenizer_config(args, tokenizer_name):
             "class_name": "helm.tokenizers.huggingface_tokenizer.HuggingFaceTokenizer",
             "args": {"pretrained_model_name_or_path": args.tokenizer},
         },
-        "end_of_text_token": "<|im_end|>",
-        "prefix_token": "<|im_start|>",
+        # "end_of_text_token": "<｜begin▁of▁sentence｜>",
+        # "prefix_token": "<｜end▁of▁sentence｜>",
+        "end_of_text_token": "<｜endoftext｜>",
+        "prefix_token": "<｜startoftext｜>",
     }
 
     action = upsert_list_entry(configs, "name", tokenizer_name, entry)
@@ -442,7 +445,7 @@ Examples:
                         help="Benchmark(s) to run (default: aratrust)")
     parser.add_argument("--benchmark-args", default=None, help="Override benchmark args (e.g. category=all)")
     parser.add_argument("--suite", required=True, help="Suite name for output dir and DB tracking")
-    parser.add_argument("--max-instances", type=int, default=600, help="Max eval instances (default: 600)")
+    parser.add_argument("--max-instances", type=int, default=200000, help="Max eval instances (default: 600)")
 
     parser.add_argument("-n", "--num-threads", type=int, default=1, help="Number of parallel threads (default: 1)")
 

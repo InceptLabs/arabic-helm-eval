@@ -28,3 +28,12 @@
     "args":
       "base_url": "https://api.fireworks.ai/inference/v1"
       "openai_model_name": "accounts/fireworks/models/deepseek-v3p2"
+- "name": "fireworks/zai_glm5"
+  "model_name": "fireworks/zai_glm5"
+  "tokenizer_name": "glm5_tokenizer"
+  "max_sequence_length": !!int "131072"
+  "client_spec":
+    "class_name": "fireworks_client.FireworksNoThinkingClient"
+    "args":
+      "base_url": "https://api.fireworks.ai/inference/v1"
+      "openai_model_name": "accounts/fireworks/models/glm-5"

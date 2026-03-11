@@ -20,3 +20,10 @@
       "pretrained_model_name_or_path": "deepseek-ai/DeepSeek-V3.2"
   "end_of_text_token": "<｜begin▁of▁sentence｜>"
   "prefix_token": "<｜end▁of▁sentence｜>"
+- "name": "glm5_tokenizer"
+  "tokenizer_spec":
+    "class_name": "helm.tokenizers.huggingface_tokenizer.HuggingFaceTokenizer"
+    "args":
+      "pretrained_model_name_or_path": "zai-org/GLM-5"
+  "end_of_text_token": "<｜endoftext｜>"
+  "prefix_token": "<｜startoftext｜>"

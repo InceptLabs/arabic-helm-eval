@@ -16,3 +16,8 @@
   "description": "fireworks/deepseek3_2"
   "creator_organization_name": ""
   "access": "open"
+- "name": "fireworks/zai_glm5"
+  "display_name": "fireworks/zai_glm5"
+  "description": "fireworks/zai_glm5"
+  "creator_organization_name": ""
+  "access": "open"
