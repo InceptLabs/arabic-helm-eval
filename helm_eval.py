@@ -224,11 +224,40 @@ def ensure_model_deployment(args):
     return tokenizer_name
 
 
+def _fetch_tokenizer_tokens(tokenizer_id):
+    """Fetch EOS/BOS tokens from HuggingFace tokenizer_config.json."""
+    try:
+        from huggingface_hub import hf_hub_download
+        import json
+
+        config_path = hf_hub_download(tokenizer_id, "tokenizer_config.json")
+        with open(config_path) as f:
+            config = json.load(f)
+
+        eos = config.get("eos_token")
+        bos = config.get("bos_token")
+
+        # Some configs store tokens as dicts with "content" key
+        if isinstance(eos, dict):
+            eos = eos.get("content", eos)
+        if isinstance(bos, dict):
+            bos = bos.get("content", bos)
+
+        return eos, bos
+    except Exception as e:
+        print(f"  Warning: Could not fetch tokenizer config for {tokenizer_id}: {e}")
+        print("  Falling back to default tokens (<|im_end|>, <|im_start|>)")
+        return "<|im_end|>", "<|im_start|>"
+
+
 def ensure_tokenizer_config(args, tokenizer_name):
     """Add or update tokenizer entry in tokenizer_configs.yaml."""
     path = PROJECT_DIR / "tokenizer_configs.yaml"
     data = load_yaml(path)
     configs = data.setdefault("tokenizer_configs", [])
+
+    eos_token, bos_token = _fetch_tokenizer_tokens(args.tokenizer)
+    print(f"  Tokenizer tokens: eos={eos_token!r}, bos={bos_token!r}")
 
     entry = {
         "name": tokenizer_name,
@@ -236,8 +265,8 @@ def ensure_tokenizer_config(args, tokenizer_name):
             "class_name": "helm.tokenizers.huggingface_tokenizer.HuggingFaceTokenizer",
             "args": {"pretrained_model_name_or_path": args.tokenizer},
         },
-        "end_of_text_token": "<|im_end|>",
-        "prefix_token": "<|im_start|>",
+        "end_of_text_token": eos_token,
+        "prefix_token": bos_token,
     }
 
     action = upsert_list_entry(configs, "name", tokenizer_name, entry)
@@ -505,7 +534,7 @@ Examples:
                         help="Benchmark(s) to run (default: aratrust)")
     parser.add_argument("--benchmark-args", default=None, help="Override benchmark args (e.g. category=all)")
     parser.add_argument("--suite", required=True, help="Suite name for output dir and DB tracking")
-    parser.add_argument("--max-instances", type=int, default=600, help="Max eval instances (default: 600)")
+    parser.add_argument("--max-instances", type=int, default=99999, help="Max eval instances per subset (default: no practical limit)")
 
     parser.add_argument("-n", "--num-threads", type=int, default=1, help="Number of parallel threads (default: 1)")
 

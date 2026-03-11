@@ -18,4 +18,3 @@
     "args":
       "base_url": "https://api.fireworks.ai/inference/v1"
       "openai_model_name": "accounts/fireworks/models/kimi-k2p5"
-      "system_prompt": ""
