@@ -51,6 +51,7 @@ BENCHMARKS = {
     "arabic_exams": "subject=all",
     "arabic_mmmlu": "subject=all",
     "alrage": "",
+    "madinah_qa": "subset=all",
 }
 
 # Generation benchmarks should NOT get the MCQ system prompt
@@ -67,6 +68,11 @@ ALGHAFA_SUBSETS = [
     "multiple_choice_rating_sentiment_no_neutral_task",
     "multiple_choice_rating_sentiment_task",
     "multiple_choice_sentiment_task",
+]
+
+MADINAH_QA_SUBSETS = [
+    "Arabic_Language_(General)",
+    "Arabic_Language_(Grammar)",
 ]
 
 ARABIC_MMMLU_SUBJECTS = [
@@ -213,6 +219,8 @@ def _expand_benchmark_entries(benchmark, bench_args, model_name):
     Benchmarks like alghafa and arabic_mmmlu don't support 'all' natively,
     so we expand them into individual subset entries.
     """
+    if benchmark == "madinah_qa" and bench_args == "subset=all":
+        return [f"madinah_qa:subset={s},model={model_name}" for s in MADINAH_QA_SUBSETS]
     if benchmark == "alghafa" and bench_args == "subset=all":
         return [f"alghafa:subset={s},model={model_name}" for s in ALGHAFA_SUBSETS]
     if benchmark == "arabic_mmmlu" and bench_args == "subject=all":
