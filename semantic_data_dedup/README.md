@@ -43,20 +43,19 @@ Six-step pipeline to profile, deduplicate, and clean a 211K-row Arabic fine-tuni
           │04_semantic_dedup│ ── OpenAI embeddings + FAISS cosine search
           └──────┬────────┘
                  │  200,619 rows (−10,439)
-    ┌────────────┤
-    ▼            ▼
-┌──────────┐ ┌──────────┐
-│05_leakage│ │threshold  │ ── Manual review of similarity bands
-│  _check  │ │calibration│
-└────┬─────┘ └──────────┘
-     │
-     ▼
-┌──────────────┐
-│06_build_clean│ ── Combine all removals → final clean JSONL
-└──────────────┘
-     │
-     ▼
-  CLEAN (200,428 rows, −5.04%)
+                 ▼
+          ┌───────────────┐
+          │05_leakage_check│ ── Layer 1: regex/keyword heuristic
+          │                │    Layer 2: embedding cross-search vs benchmarks
+          └──────┬────────┘
+                 │
+                 ▼
+          ┌──────────────┐
+          │06_build_clean│ ── Combine all removals → final clean JSONL
+          └──────────────┘
+                 │
+                 ▼
+           CLEAN (TBD rows)
 ```
 
 ---
@@ -283,16 +282,20 @@ Texts exceeding 5,000 chars are truncated before embedding. Arabic tokenizes at 
 
 ## Step 5: Leakage Check (`05_leakage_check.py`)
 
-Heuristic pattern matching to flag rows that may derive from the six HELM Arabic benchmarks. This estimates contamination risk, not confirmed leakage.
+Two-layer contamination detection against the seven HELM Arabic benchmarks.
 
-### Detection Signals
+### Layer 1: Heuristic (regex / keyword)
+
+Pattern matching to flag rows that may derive from benchmarks. Broad signal, low precision.
+
+**Detection signals:**
 
 1. **Structural fingerprints:** MCQ option formatting, true/false patterns, sentiment scales
 2. **Keyword anchors:** Benchmark-specific terms (subject names, Arabic safety terms, exam vocabulary)
 3. **Direct benchmark mentions:** Rows containing "HELM", "benchmark", "leaderboard", benchmark names
 4. **Answer-pattern leakage:** Assistant text with scoring rubrics or "الإجابة الصحيحة هي:" wrappers
 
-### Results
+**Heuristic results:**
 
 ```
 Benchmark          Flagged    %
@@ -313,7 +316,69 @@ Total unique       167,268   79.3%  (heuristic, many false positives)
 
 > **Important:** The 79.3% heuristic flag rate is inflated. Most flagged rows are *legitimately about these topics* (e.g., a question about biology naturally triggers the MMLU subject pattern). The high-confidence signals (182 direct mentions + 31,914 rubric leaks) are more actionable.
 
-**Output:** `reports/05_leakage_report.json`
+### Layer 2: Embedding Cross-Search (high precision)
+
+Compares training data embeddings against actual benchmark question embeddings using FAISS cosine similarity. Instead of "does this row mention biology?", it asks "is this training row semantically near-identical to a specific MMLU question?"
+
+**How it works:**
+
+```
+  Benchmark questions (~33K)              Training embeddings (211K)
+  from 7 HuggingFace datasets            from step 4 (04_embeddings.npy)
+          │                                        │
+          ▼  Embed with text-embedding-3-small     │
+          │  (same model as step 4)                │
+          │  Cache: data/05_benchmark_embeddings.npy
+          │                                        │
+          ▼  L2-normalize                          │
+          │                                        │
+          └──────────┬─────────────────────────────┘
+                     │
+                     ▼  FAISS IndexFlatIP cross-search
+                     │  (top-5 neighbors per benchmark question)
+                     │
+                     ▼  Flag training rows with cosine >= threshold (default 0.88)
+                     │
+                     ▼  Calibration samples at similarity bands for manual review
+```
+
+**Benchmark datasets searched:**
+
+| Benchmark | HuggingFace Dataset | Questions |
+|-----------|-------------------|-----------|
+| arabic_mmlu | MBZUAI/ArabicMMLU | ~14,575 |
+| arabic_mmmlu | MBZUAI/human_translated_arabic_mmlu | ~14,042 |
+| alrage | OALL/ALRAGE | ~2,106 |
+| madinah_qa | MBZUAI/MadinahQA | ~615 |
+| alghafa | OALL/AlGhafa-Arabic-LLM-Benchmark-Native | ~562 |
+| arabic_exams | OALL/Arabic_EXAMS | ~562 |
+| aratrust | asas-ai/AraTrust | ~522 |
+
+For MCQ benchmarks, questions are embedded with their options concatenated (e.g., "Question\nA) opt1\nB) opt2\nC) opt3\nD) opt4") to distinguish questions sharing the same stem.
+
+**CLI flags:**
+
+```bash
+# Full run (both layers)
+python 05_leakage_check.py
+
+# Heuristic only (skip embeddings)
+python 05_leakage_check.py --no-embedding-leakage
+
+# Test with single benchmark
+python 05_leakage_check.py --benchmarks madinah_qa
+
+# Custom threshold
+python 05_leakage_check.py --leakage-threshold 0.90
+
+# Reuse cached benchmark embeddings
+python 05_leakage_check.py --skip-embed
+```
+
+**Output:**
+- `reports/05_leakage_report.json` — combined report from both layers
+- `reports/05_leakage_samples/` — JSONL files with sample match pairs at each similarity band
+- `data/05_benchmark_embeddings.npy` — cached benchmark embeddings (~200 MB)
 
 ---
 
@@ -326,9 +391,10 @@ Combines removal decisions from all previous steps into a final clean JSONL.
 | Reason | Rows Removed |
 |--------|-------------|
 | Semantic duplicate (cosine >= 0.93) | 10,439 |
+| Embedding leakage (cross-search vs benchmarks) | *TBD after first run* |
 | Leakage high-confidence (benchmark mentions + rubric patterns) | 200 |
 | Exact duplicate (L3 think-stripped) | 17 |
-| **Total removed** | **10,647 (5.04%)** |
+| **Total removed** | **TBD** |
 
 ### Final Result
 
@@ -353,13 +419,13 @@ Removed:  10,647 rows  (5.04%)
 ```
 semantic-data-dedup/
 ├── ar93_en7_mcq85_open15_cot96_211k.jsonl  # Source (untouched, 616 MB)
-├── requirements.txt                         # openai, faiss-cpu, numpy, sentence-transformers
+├── requirements.txt                         # openai, faiss-cpu, numpy, sentence-transformers, datasets
 ├── run_pipeline.py                          # Single-command runner for all steps
 ├── 01_profile.py                            # Streaming profiler
 ├── 02_sample.py                             # Stratified reservoir sampling
 ├── 03_exact_dedup.py                        # 5-level hash dedup
 ├── 04_semantic_dedup.py                     # Embedding + FAISS dedup
-├── 05_leakage_check.py                      # Benchmark contamination check
+├── 05_leakage_check.py                      # Benchmark contamination (heuristic + embedding)
 ├── 06_build_clean.py                        # Final assembly
 ├── README.md                                # Pipeline overview + results
 ├── detailed_readme.md                       # Algorithmic deep dive
@@ -371,22 +437,24 @@ semantic-data-dedup/
 │   ├── 04_embeddings_checkpoint.npy         # Partial embedding checkpoint
 │   ├── 04_semantic_clusters.json            # Semantic duplicate clusters (3,508)
 │   ├── 04_deduped.jsonl                     # After semantic dedup (200,619 rows)
-│   ├── 06_clean.jsonl                       # Final clean dataset (200,428 rows)
-│   └── 06_removal_log.jsonl                 # Removal audit log (10,647 entries)
+│   ├── 05_benchmark_embeddings.npy          # Benchmark question embeddings (~200 MB)
+│   ├── 06_clean.jsonl                       # Final clean dataset
+│   └── 06_removal_log.jsonl                 # Removal audit log
 └── reports/
     ├── 01_profile_report.json
     ├── 02_samples/                          # 16 stratified sample slices
     ├── 03_exact_dedup_report.json
     ├── 04_similarity_histogram.json
     ├── 04_threshold_samples/                # Pairs at 4 similarity bands
-    ├── 05_leakage_report.json
+    ├── 05_leakage_report.json               # Combined heuristic + embedding report
+    ├── 05_leakage_samples/                  # Embedding cross-search calibration pairs
     └── 06_final_report.md                   # Human-readable summary
 ```
 
 ## Running
 
 ```bash
-pip install openai faiss-cpu numpy sentence-transformers
+pip install openai faiss-cpu numpy sentence-transformers datasets
 ```
 
 ### One command (recommended)

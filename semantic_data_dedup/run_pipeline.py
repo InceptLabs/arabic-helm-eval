@@ -56,7 +56,7 @@ Steps:
   2  Sample          Stratified reservoir sampling for manual audit
   3  Exact Dedup     Hash-based dedup at 5 normalization levels (L1-L5)
   4  Semantic Dedup  OpenAI/local embeddings + FAISS cosine similarity
-  5  Leakage Check   Benchmark contamination pattern matching
+  5  Leakage Check   Heuristic + embedding cross-search contamination detection
   6  Build Clean     Combine all removals into final clean dataset
 
 Examples:
@@ -92,6 +92,12 @@ Examples:
     sem_group.add_argument("--skip-embed", action="store_true",
                            help="Reuse cached embeddings (skip embedding + FAISS search)")
 
+    leak_group = parser.add_argument_group("Step 5: Leakage Check")
+    leak_group.add_argument("--leakage-threshold", type=float, default=0.88,
+                            help="Cosine threshold for embedding leakage (default: %(default)s)")
+    leak_group.add_argument("--skip-embedding-leakage", action="store_true",
+                            help="Skip embedding-based leakage check (run only heuristic)")
+
     flow_group = parser.add_argument_group("Pipeline Control")
     flow_group.add_argument("--start-from", type=int, default=1, choices=range(1, 7),
                             metavar="{1-6}",
@@ -122,6 +128,8 @@ Examples:
         print(f"  Threshold:  {args.threshold}", flush=True)
         print(f"  Top-k:      {args.top_k}", flush=True)
         print(f"  Skip embed: {args.skip_embed}", flush=True)
+    if args.start_from <= 5 <= args.stop_after:
+        print(f"  Leakage:    {'heuristic only' if args.skip_embedding_leakage else f'heuristic + embedding (threshold={args.leakage_threshold})'}", flush=True)
 
     total_t0 = time.time()
     timings = {}
@@ -167,12 +175,16 @@ Examples:
             sys.argv.append("--skip-embed")
         timings[4] = run_step(4, "Semantic Dedup", mod.main, {})
 
-    # --- Step 5: Leakage Check ---
+    # --- Step 5: Leakage Check (heuristic + embedding) ---
     if args.start_from <= 5 <= args.stop_after:
         mod = __import__("05_leakage_check")
         timings[5] = run_step(5, "Leakage Check", mod.check_leakage, {
             "input_file": deduped_file,
             "report_dir": report_dir,
+            "data_dir": data_dir,
+            "embedding_leakage": not args.skip_embedding_leakage,
+            "leakage_threshold": args.leakage_threshold,
+            "skip_embed": args.skip_embed,
         })
 
     # --- Step 6: Build Clean ---

@@ -68,11 +68,11 @@ def load_semantic_dedup_removals(data_dir):
 
 
 def load_leakage_flags(report_dir):
-    """Get row indices flagged for potential leakage."""
+    """Get row indices flagged for potential leakage (heuristic + embedding)."""
     report_path = report_dir / "05_leakage_report.json"
     data = load_json_safe(report_path)
     if not data:
-        return set(), set(), {}
+        return set(), set(), set(), {}
 
     all_flagged = set()
     high_confidence = set()
@@ -86,12 +86,21 @@ def load_leakage_flags(report_dir):
     for idx in data.get("rubric_leak_rows", {}).get("sample_indices", []):
         high_confidence.add(idx)
 
+    # Embedding leakage (Layer 2)
+    embedding_flagged = set()
+    emb_data = data.get("embedding_leakage", {})
+    if not emb_data.get("skipped", False):
+        for idx in emb_data.get("flagged_training_indices", []):
+            embedding_flagged.add(idx)
+
     stats = {
         "total_flagged": data.get("summary", {}).get("total_flagged_unique", 0),
         "direct_mentions": data.get("direct_benchmark_mentions", {}).get("count", 0),
         "rubric_leaks": data.get("rubric_leak_rows", {}).get("count", 0),
+        "embedding_leakage": emb_data.get("contaminated_training_rows", 0),
+        "embedding_threshold": emb_data.get("threshold", None),
     }
-    return all_flagged, high_confidence, stats
+    return all_flagged, high_confidence, embedding_flagged, stats
 
 
 def build_clean(source_file=None, report_dir=None, data_dir=None):
@@ -104,11 +113,12 @@ def build_clean(source_file=None, report_dir=None, data_dir=None):
     print("Loading removal sets...", file=sys.stderr)
     exact_removed = load_exact_dedup_removals(DATA_DIR)
     semantic_removed, semantic_stats = load_semantic_dedup_removals(DATA_DIR)
-    leakage_all, leakage_high, leakage_stats = load_leakage_flags(REPORT_DIR)
+    leakage_all, leakage_high, embedding_flagged, leakage_stats = load_leakage_flags(REPORT_DIR)
 
     print(f"  Exact dedup removals:    {len(exact_removed):,}", file=sys.stderr)
     print(f"  Semantic dedup removals: {len(semantic_removed):,}", file=sys.stderr)
     print(f"  Leakage high-confidence: {len(leakage_high):,}", file=sys.stderr)
+    print(f"  Embedding leakage:       {len(embedding_flagged):,}", file=sys.stderr)
 
     clean_path = DATA_DIR / "06_clean.jsonl"
     log_path = DATA_DIR / "06_removal_log.jsonl"
@@ -134,6 +144,8 @@ def build_clean(source_file=None, report_dir=None, data_dir=None):
                 reasons.append("semantic_duplicate")
             if idx in leakage_high:
                 reasons.append("leakage_high_confidence")
+            if idx in embedding_flagged:
+                reasons.append("embedding_leakage")
 
             if reasons:
                 for r in reasons:
@@ -201,7 +213,7 @@ def build_clean(source_file=None, report_dir=None, data_dir=None):
         for band, count in sim_hist.get("histogram", {}).items():
             md.append(f"| {band} | {count:,} |\n")
 
-    md.append("\n## 4. Leakage Check (Phase 5)\n")
+    md.append("\n## 4a. Leakage Check — Heuristic (Phase 5, Layer 1)\n")
     if leakage_report:
         md.append(f"- Direct benchmark mentions: {leakage_stats.get('direct_mentions', '?'):,}\n")
         md.append(f"- Rubric leak rows: {leakage_stats.get('rubric_leaks', '?'):,}\n")
@@ -210,6 +222,30 @@ def build_clean(source_file=None, report_dir=None, data_dir=None):
         for bname, info in leakage_report.get("benchmark_flags", {}).items():
             md.append(f"| {bname} | {info.get('flagged_count', 0):,} | "
                       f"{info.get('flagged_fraction', 0)*100:.1f}% |\n")
+
+    md.append("\n## 4b. Leakage Check — Embedding Cross-Search (Phase 5, Layer 2)\n")
+    emb_leakage = leakage_report.get("embedding_leakage", {}) if leakage_report else {}
+    if emb_leakage.get("skipped"):
+        md.append(f"- Skipped: {emb_leakage.get('reason', 'unknown')}\n")
+    elif emb_leakage:
+        md.append(f"- Threshold: {emb_leakage.get('threshold', '?')}\n")
+        md.append(f"- Benchmark questions checked: {emb_leakage.get('benchmark_questions_total', '?'):,}\n")
+        md.append(f"- Contaminated training rows: {emb_leakage.get('contaminated_training_rows', '?'):,} "
+                  f"({emb_leakage.get('contaminated_fraction', 0)*100:.2f}%)\n")
+        per_bench = emb_leakage.get("per_benchmark", {})
+        if per_bench:
+            md.append("\n| Benchmark | Questions | Train Rows Flagged |\n|-----------|-----------|-------------------|\n")
+            for bname, info in per_bench.items():
+                md.append(f"| {bname} | {info.get('questions_loaded', 0):,} | "
+                          f"{info.get('training_rows_flagged', 0):,} |\n")
+        hist_stats = emb_leakage.get("score_histogram", {}).get("stats", {})
+        if hist_stats:
+            md.append(f"\n- Score stats: mean={hist_stats.get('mean', '?')}, "
+                      f"median={hist_stats.get('median', '?')}, "
+                      f"p95={hist_stats.get('p95', '?')}, "
+                      f"p99={hist_stats.get('p99', '?')}\n")
+    else:
+        md.append("- Not available\n")
 
     md.append("\n## 5. Final Removal Breakdown\n")
     md.append("\n| Reason | Rows Removed |\n|--------|--------------|\n")
